@@ -6,10 +6,24 @@ const FEATURE_COLORS = {
   farm:         { bg: "bg-emerald-500/20", text: "text-emerald-300", dot: "bg-emerald-400", label: "Farm / Field" },
   building:     { bg: "bg-sky-500/20",     text: "text-sky-300",     dot: "bg-sky-400",     label: "Building" },
   water:        { bg: "bg-blue-600/20",    text: "text-blue-300",    dot: "bg-blue-400",    label: "Water Body" },
+  tree:         { bg: "bg-emerald-600/20", text: "text-emerald-400", dot: "bg-emerald-500", label: "Tree Crown" },
+  road:         { bg: "bg-amber-500/20",   text: "text-amber-300",   dot: "bg-amber-400",   label: "Road Centerline" },
   unclassified: { bg: "bg-slate-500/20",   text: "text-slate-400",   dot: "bg-slate-400",   label: "Unclassified" },
 };
 
-export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, onOpenInMap, job, geojson, jobStatus }) {
+
+export default function UploadPanel({
+  onUploaded,
+  onExtracted,
+  onStatusUpdate,
+  onOpenInMap,
+  onToggleLayer,
+  activeLayers,
+  job,
+  geojson,
+  jobStatus,
+}) {
+
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [extracting, setExtracting] = useState(false);
@@ -107,6 +121,31 @@ export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, o
     }
   }
 
+  async function handleFastDemo() {
+    const targetJobId = job?.job_id || "demo";
+    setError(null);
+    setExtracting(true);
+    stopPolling();
+
+    try {
+      const res = await fetch(`${API_URL}/extract/${targetJobId}?demo=true`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to load pre-cached demo dataset");
+      const st = await res.json();
+      onStatusUpdate(st);
+
+      const gjr = await fetch(`${API_URL}/export/${targetJobId}?format=geojson`);
+      if (gjr.ok) {
+        const gj = await gjr.json();
+        onExtracted(gj);
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+
   function handleExport(format) {
     if (!job) return;
     window.open(`${API_URL}/export/${job.job_id}?format=${format}`, "_blank");
@@ -197,14 +236,27 @@ export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, o
 
             {/* Idle */}
             {!isProcessing && !isCompleted && !isFailed && (
-              <button
-                onClick={handleExtract}
-                disabled={extracting}
-                className="w-full bg-white/10 hover:bg-white/15 text-slate-100 font-medium text-xs rounded-lg py-2.5 disabled:opacity-40 transition-all active:scale-[0.98] border border-white/10"
-              >
-                {extracting ? "Starting…" : "Run Extraction"}
-              </button>
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => handleExtract()}
+                  disabled={extracting}
+                  className="w-full bg-white/10 hover:bg-white/15 text-slate-100 font-medium text-xs rounded-lg py-2.5 disabled:opacity-40 transition-all active:scale-[0.98] border border-white/10"
+                >
+                  {extracting ? "Starting…" : "Run Live Extraction"}
+                </button>
+                <button
+                  onClick={handleFastDemo}
+                  disabled={extracting}
+                  className="w-full bg-accent/20 hover:bg-accent/30 text-accent font-semibold text-xs rounded-lg py-2 disabled:opacity-40 transition-all border border-accent/40 flex items-center justify-center gap-1.5"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                  Instant Demo Mode (&lt;1s)
+                </button>
+              </div>
             )}
+
 
             {/* TASK 7: Professional Processing UI */}
             {isProcessing && (
@@ -213,7 +265,10 @@ export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, o
                   <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
                   <h3 className="text-xs font-bold uppercase tracking-wider text-accent">DRISHTI AI EXTRACTION</h3>
                 </div>
-                <p className="text-xs text-slate-300 font-medium">Analyzing satellite imagery...</p>
+                <p className="text-xs text-slate-300 font-medium">
+                  {currentTile === 0 ? "Initializing Neural Models & Tiling Grid (Tile 1 running...)" : "Analyzing satellite imagery..."}
+                </p>
+
                 
                 <div className="flex items-center justify-between text-xs text-slate-400">
                   <span>Tile {currentTile} / {totalTiles || "121"}</span>
@@ -356,6 +411,16 @@ export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, o
             </button>
 
             <button
+              onClick={() => handleExport("image")}
+              className="w-full flex items-center justify-center gap-2 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-xs font-semibold rounded-lg py-2.5 border border-emerald-500/30 transition-all"
+            >
+              <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              Download Vectorized Image (.png)
+            </button>
+
+            <button
               onClick={() => handleExport("gpkg")}
               className="w-full text-slate-400 hover:text-slate-200 text-[11px] text-center pt-1 transition-all"
             >
@@ -363,6 +428,7 @@ export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, o
             </button>
           </div>
         )}
+
 
         {/* TASK 9: Human-Readable Error Display */}
         {error && (
@@ -377,18 +443,35 @@ export default function UploadPanel({ onUploaded, onExtracted, onStatusUpdate, o
           </div>
         )}
 
-        {/* Legend */}
-        <div className="mt-auto pt-4">
-          <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-600 mb-2">Map Legend</p>
-          <div className="flex flex-col gap-1.5">
-            {Object.entries(FEATURE_COLORS).map(([type, cfg]) => (
-              <div key={type} className="flex items-center gap-2">
-                <span className={`w-2.5 h-2.5 rounded-full ${cfg.dot}`} />
-                <span className="text-xs text-slate-500">{cfg.label}</span>
-              </div>
-            ))}
+        {/* Legend & Layer Toggles */}
+        <div className="mt-auto pt-4 border-t border-white/10">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Layers & Legend</p>
+            <span className="text-[10px] text-slate-600">Toggle visibility</span>
+          </div>
+          <div className="flex flex-col gap-2">
+            {Object.entries(FEATURE_COLORS).map(([type, cfg]) => {
+              const isChecked = activeLayers ? activeLayers[type] !== false : true;
+              return (
+                <label key={type} className="flex items-center justify-between cursor-pointer select-none group">
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full ${cfg.dot}`} />
+                    <span className={`text-xs ${isChecked ? "text-slate-200 font-medium" : "text-slate-500 line-through"}`}>
+                      {cfg.label}
+                    </span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => onToggleLayer && onToggleLayer(type)}
+                    className="rounded bg-slate-800 border-white/10 text-accent focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                  />
+                </label>
+              );
+            })}
           </div>
         </div>
+
 
       </div>
     </div>

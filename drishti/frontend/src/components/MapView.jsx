@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
-import { MapContainer, TileLayer, GeoJSON, CircleMarker, Popup, useMap } from "react-leaflet";
+import { MapContainer, TileLayer, GeoJSON, ImageOverlay, CircleMarker, Popup, useMap } from "react-leaflet";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const DEFAULT_CENTER = [51.364, 15.860]; // LandCover.ai demo tile (Poland)
+
 
 const FEATURE_TYPE_COLOR = {
   farm:         { stroke: "#34d399", fill: "#34d399" }, // emerald
@@ -91,18 +93,29 @@ function BoundsFitter({ bounds }) {
   return null;
 }
 
-export default function MapView({ bounds, geojson }) {
+export default function MapView({ bounds, geojson, activeLayers, jobId }) {
   const center = bounds
     ? [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]
     : DEFAULT_CENTER;
 
-  const pointFeatures = geojson?.features.filter((f) => f.geometry.type === "Point") ?? [];
+
+  const pointFeatures = (geojson?.features || []).filter((f) => {
+    if (f.geometry.type !== "Point") return false;
+    const ftype = f.properties?.classification || f.properties?.feature_type || "unclassified";
+    return activeLayers ? activeLayers[ftype] !== false : true;
+  });
+
   const shapeFeatures = {
     type: "FeatureCollection",
-    features: geojson?.features.filter((f) => f.geometry.type !== "Point") ?? [],
+    features: (geojson?.features || []).filter((f) => {
+      if (f.geometry.type === "Point") return false;
+      const ftype = f.properties?.classification || f.properties?.feature_type || "unclassified";
+      return activeLayers ? activeLayers[ftype] !== false : true;
+    }),
   };
 
-  const geojsonKey = geojson ? geojson.features.length : 0;
+  const geojsonKey = `${geojson?.features.length || 0}_${JSON.stringify(activeLayers || {})}`;
+
 
   return (
     <>
@@ -130,14 +143,28 @@ export default function MapView({ bounds, geojson }) {
         className="h-full w-full"
         zoomControl={true}
       >
-        {/* Dark satellite-style base map */}
+        {/* Clean Satellite Base Map */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          attribution='&copy; <a href="https://www.esri.com/">Esri World Imagery</a>'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
           maxZoom={19}
         />
 
+
+        {/* Actual uploaded satellite orthophoto raster overlay layer */}
+        {bounds && (
+          <ImageOverlay
+            url={`${API_URL}/raster/${jobId || "demo"}`}
+            bounds={[
+              [bounds[1], bounds[0]],
+              [bounds[3], bounds[2]],
+            ]}
+            opacity={0.88}
+          />
+        )}
+
         <BoundsFitter bounds={bounds} />
+
 
         {geojson && (
           <GeoJSON

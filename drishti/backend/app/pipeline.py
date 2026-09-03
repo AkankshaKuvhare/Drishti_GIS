@@ -97,7 +97,86 @@ def get_mask_generator() -> SamAutomaticMaskGenerator:
     return _MASK_GENERATOR
 
 
+_DEEPFOREST_MODEL = None
+
+def get_deepforest_model():
+    """
+    Lazy-load DeepForest neural RGB tree crown object detector.
+    """
+    global _DEEPFOREST_MODEL
+    if _DEEPFOREST_MODEL is None:
+        try:
+            from deepforest import main as df_main
+            df = df_main.deepforest()
+            _DEEPFOREST_MODEL = df
+        except Exception as e:
+            print(f"DeepForest initialization fallback: {e}")
+            _DEEPFOREST_MODEL = False
+    return _DEEPFOREST_MODEL if _DEEPFOREST_MODEL is not False else None
+
+
+def run_deepforest_trees(tile_rgb: np.ndarray, transform, tile_path: str = None) -> list[dict]:
+    """
+    Extract neural tree crown bounding box polygons using DeepForest model.
+    """
+    df_model = get_deepforest_model()
+    if df_model is None:
+        return []
+
+    try:
+        if tile_path and os.path.exists(tile_path):
+            boxes = df_model.predict_image(path=tile_path)
+        else:
+            img_float = (tile_rgb.astype("float32") / 255.0)
+            boxes = df_model.predict_image(image=img_float)
+    except Exception as e:
+
+
+        print(f"DeepForest inference warning: {e}")
+        return []
+
+    if boxes is None or len(boxes) == 0:
+        return []
+
+    tree_features = []
+    for idx, row in boxes.iterrows():
+        score = float(row["score"]) if "score" in row else float(row.get("confidence", 0.85))
+        if score < 0.35:
+            continue
+
+        xmin, ymin, xmax, ymax = float(row["xmin"]), float(row["ymin"]), float(row["xmax"]), float(row["ymax"])
+        x1, y1 = rasterio.transform.xy(transform, ymin, xmin)
+        x2, y2 = rasterio.transform.xy(transform, ymax, xmax)
+
+        poly_coords = [[
+            [x1, y1], [x2, y1], [x2, y2], [x1, y2], [x1, y1]
+        ]]
+
+        poly = shape({"type": "Polygon", "coordinates": poly_coords})
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+
+        feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": poly_coords
+            },
+            "properties": {
+                "classification": "tree",
+                "feature_type": "tree",
+                "confidence": round(score, 2),
+                "classification_method": "deepforest_neural",
+                "area_m2": round(float(poly.area * 111000 * 111000), 1)
+            }
+        }
+        tree_features.append(feature)
+
+    return tree_features
+
+
 def classify_mask_heuristic(
+
     mask_bool: np.ndarray,
     bbox: list[int],
     area: int,
@@ -134,21 +213,39 @@ def classify_mask_heuristic(
     mean_b = float(np.mean(mask_pixels[:, 2]))
 
     # Water Heuristic: Relative Blue/Green channel dominance over Red
-    # (Without absolute mean_b > 80 brightness floor, catching dark & turbid water)
     if (mean_b > mean_r + 3.0 and mean_g > mean_r) or (mean_b > mean_r and mean_g > mean_r + 3.0):
         return "water", 1.0
 
-    # Farm / Agriculture Heuristic: Excess Green Index (2G - R - B)
     exg = (2.0 * mean_g) - mean_r - mean_b
-    if exg > 15.0 or (mean_g > mean_r + 5.0 and mean_g > mean_b + 5.0):
+    mean_brightness = (mean_r + mean_g + mean_b) / 3.0
+
+    # Road Heuristic (FIXED): Neutral asphalt/dirt corridors — elongated OR near-square compact
+    # Relaxed from >3.2 to >2.5; also catch near-square road patches (0.5-2.0 AR) that are gray
+    is_neutral_gray = abs(mean_r - mean_g) < 15.0 and abs(mean_g - mean_b) < 15.0 and 35.0 <= mean_brightness <= 190.0
+    is_elongated = aspect_ratio > 2.5 or aspect_ratio < 0.4
+    if is_neutral_gray and (is_elongated or (rectangularity > 0.55 and exg < 5.0 and area < 20000)):
+        return "road", 0.88
+
+    # Tree Crown Heuristic (FIXED — runs BEFORE farm to prevent canopy absorption):
+    # Small-to-medium compact green blobs (individual crowns or crown clusters).
+    # Key differentiator from farm: much smaller area (< 25000 m² proxy pixels) and higher ExG.
+    is_strongly_green = exg > 18.0 or (mean_g > mean_r + 8.0 and mean_g > mean_b + 8.0)
+    is_compact_canopy = area < 30000 and 0.25 <= rectangularity <= 1.0
+    if is_strongly_green and is_compact_canopy:
+        return "tree", 0.90
+
+    # Farm / Agriculture Heuristic: Broad green fields (larger areas, lower ExG threshold)
+    if exg > 10.0 or (mean_g > mean_r + 4.0 and mean_g > mean_b + 4.0):
         return "farm", 1.0
 
     # Structural / Building Heuristic: Aspect ratio & high rectangularity
-    if 0.35 <= aspect_ratio <= 2.85 and rectangularity > 0.45 and (mean_r > 50 or mean_g > 50 or mean_b > 50):
+    if 0.35 <= aspect_ratio <= 2.85 and rectangularity > 0.45 and mean_brightness > 45:
         return "building", 1.0
 
-    # TASK 1 FIX: Default fallback to explicit 'unclassified' with 0.5 confidence multiplier
+    # Fallback: explicit 'unclassified' with 0.5 confidence penalty multiplier
     return "unclassified", 0.5
+
+
 
 
 def _deduplicate_features(raw_features: list[dict], iou_threshold: float = 0.4) -> list[dict]:
@@ -293,8 +390,18 @@ def run_extraction(
                 if np.std(tile_rgb) < 3.0:
                     continue
 
-                # 2. Run MobileSAM Automatic Mask Generator on tile
+                # 2. Run DeepForest Neural Tree Crown Detector (if available)
+                df_trees = run_deepforest_trees(tile_rgb, tile_transform)
+                for df_feat in df_trees:
+                    geom = df_feat["geometry"]
+                    if str(raster_crs).upper() != "EPSG:4326":
+                        geom = transform_geom(raster_crs, "EPSG:4326", geom)
+                    df_feat["geometry"] = geom
+                    raw_candidates.append(df_feat)
+
+                # 3. Run MobileSAM Automatic Mask Generator on tile
                 tile_masks = mask_generator.generate(tile_rgb)
+
 
                 for mask_info in tile_masks:
                     mask_bool = mask_info["segmentation"]

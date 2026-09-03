@@ -8,6 +8,15 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState(null); // live status from /status/{job_id}
   const [mapKey, setMapKey] = useState(0);
 
+  const [activeLayers, setActiveLayers] = useState({
+    farm: true,
+    building: true,
+    water: true,
+    unclassified: true,
+    tree: true,
+    road: true,
+  });
+
   function handleUploaded(data) {
     setJob(data);
     setGeojson(null);
@@ -19,19 +28,27 @@ export default function App() {
     setMapKey((k) => k + 1);
   }
 
+  function handleToggleLayer(layerKey) {
+    setActiveLayers((prev) => ({ ...prev, [layerKey]: !prev[layerKey] }));
+  }
+
   return (
     <div className="h-screen w-screen flex bg-ink">
       <UploadPanel
         job={job}
         geojson={geojson}
         jobStatus={jobStatus}
+        activeLayers={activeLayers}
         onUploaded={handleUploaded}
         onExtracted={(data) => setGeojson(data)}
         onStatusUpdate={(st) => setJobStatus(st)}
         onOpenInMap={handleOpenInMap}
+        onToggleLayer={handleToggleLayer}
       />
       <div className="flex-1 relative">
-        <MapView key={mapKey} bounds={job?.bounds} geojson={geojson} />
+        <MapView key={mapKey} bounds={job?.bounds} geojson={geojson} activeLayers={activeLayers} jobId={job?.job_id || "demo"} />
+
+
         
         {/* Floating feature count badge when extraction is running */}
         {jobStatus?.status === "processing" && (
