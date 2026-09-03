@@ -18,11 +18,14 @@ export default function UploadPanel({
   onStatusUpdate,
   onOpenInMap,
   onToggleLayer,
+  onConfidenceChange,
   activeLayers,
+  minConfidence,
   job,
   geojson,
   jobStatus,
 }) {
+
 
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -421,13 +424,49 @@ export default function UploadPanel({
             </button>
 
             <button
+              onClick={() => handleExport("shapefile")}
+              className="w-full bg-white/10 hover:bg-white/15 text-slate-200 font-semibold text-xs rounded-lg py-2 transition-all border border-white/10"
+            >
+              Export as ESRI Shapefile (.zip)
+            </button>
+
+            <button
+              onClick={() => handleExport("kml")}
+              className="w-full bg-white/10 hover:bg-white/15 text-slate-200 font-semibold text-xs rounded-lg py-2 transition-all border border-white/10"
+            >
+              Export as Google Earth KML (.kml)
+            </button>
+
+            <button
               onClick={() => handleExport("gpkg")}
-              className="w-full text-slate-400 hover:text-slate-200 text-[11px] text-center pt-1 transition-all"
+              className="w-full text-slate-400 hover:text-slate-200 text-[11px] text-center pt-0.5 transition-all"
             >
               Export as GeoPackage (.gpkg)
             </button>
           </div>
         )}
+
+        {/* Item 5: Confidence Threshold Slider */}
+        <div className="mt-3 py-3 border-t border-b border-white/10 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              Confidence Filter
+            </span>
+            <span className="text-xs font-bold text-accent">
+              ≥ {Math.round((minConfidence || 0) * 100)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={minConfidence || 0}
+            onChange={(e) => onConfidenceChange && onConfidenceChange(parseFloat(e.target.value))}
+            className="w-full accent-accent cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+          />
+        </div>
+
 
 
         {/* TASK 9: Human-Readable Error Display */}

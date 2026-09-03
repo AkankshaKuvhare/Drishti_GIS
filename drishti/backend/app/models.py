@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, String, DateTime, Float, JSON
+from sqlalchemy import Column, String, DateTime, Float, JSON, Index
 from geoalchemy2 import Geometry
 
 from .database import Base
@@ -36,3 +36,8 @@ class Feature(Base):
     confidence = Column(Float, nullable=False)
     geom = Column(Geometry(geometry_type="GEOMETRY", srid=4326, spatial_index=False), nullable=False)
     properties = Column(JSON, nullable=True)
+
+    __table_args__ = (
+        Index("idx_features_geom", "geom", postgresql_using="gist"),
+    )
+

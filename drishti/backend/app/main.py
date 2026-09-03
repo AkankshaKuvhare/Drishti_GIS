@@ -257,13 +257,51 @@ def export(job_id: str, format: str = "geojson", db: Session = Depends(get_db)):
             gdf = gpd.GeoDataFrame.from_features(_LAST_RESULT[job_id]["features"], crs="EPSG:4326")
             gdf.to_file(out_path, driver="GeoJSON")
         media_type = "application/geo+json"
-    elif format == "gpkg":
-        out_path = os.path.join(OUTPUT_DIR, f"{job_id}.gpkg")
+    elif format in ("shapefile", "shp"):
+        shp_dir = os.path.join(OUTPUT_DIR, f"{job_id}_shapefile")
+        os.makedirs(shp_dir, exist_ok=True)
         if job_id in _LAST_RESULT:
             gdf = gpd.GeoDataFrame.from_features(_LAST_RESULT[job_id]["features"], crs="EPSG:4326")
-            gdf.to_file(out_path, driver="GPKG")
-        media_type = "application/geopackage+sqlite3"
+            gdf.to_file(os.path.join(shp_dir, f"{job_id}.shp"), driver="ESRI Shapefile")
+        zip_path_base = os.path.join(OUTPUT_DIR, f"{job_id}_shapefile")
+        zip_file = shutil.make_archive(zip_path_base, "zip", shp_dir)
+        return FileResponse(zip_file, media_type="application/zip", filename=f"{job_id}_shapefile.zip")
+
+    elif format == "kml":
+        out_path = os.path.join(OUTPUT_DIR, f"{job_id}.kml")
+        if job_id in _LAST_RESULT:
+            features = _LAST_RESULT[job_id]["features"]
+            kml_lines = [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                '<kml xmlns="http://www.opengis.net/kml/2.2">',
+                '<Document>',
+                f'<name>Drishti Extractions - Job {job_id}</name>'
+            ]
+            for f in features:
+                props = f.get("properties", {})
+                ftype = props.get("classification", props.get("feature_type", "unclassified"))
+                coords = f["geometry"].get("coordinates", [])
+                
+                kml_lines.append('<Placemark>')
+                kml_lines.append(f'<name>{ftype.upper()} ({props.get("confidence", 0.9)*100:.0f}%)</name>')
+                kml_lines.append(f'<description>Area: {props.get("area_m2", 0)} m2</description>')
+                kml_lines.append('<Polygon><outerBoundaryIs><LinearRing><coordinates>')
+                
+                if f["geometry"]["type"] == "Polygon" and coords:
+                    coord_str = " ".join([f"{c[0]},{c[1]},0" for c in coords[0]])
+                    kml_lines.append(coord_str)
+                
+                kml_lines.append('</coordinates></LinearRing></outerBoundaryIs></Polygon>')
+                kml_lines.append('</Placemark>')
+            
+            kml_lines.extend(['</Document>', '</kml>'])
+            with open(out_path, "w", encoding="utf-8") as kf:
+                kf.write("\n".join(kml_lines))
+        
+        return FileResponse(out_path, media_type="application/vnd.google-earth.kml+xml", filename=f"{job_id}.kml")
+
     elif format in ("image", "png"):
+
         out_path = os.path.join(OUTPUT_DIR, f"{job_id}_vectorized.png")
         if True:
             import matplotlib
@@ -328,6 +366,49 @@ def export(job_id: str, format: str = "geojson", db: Session = Depends(get_db)):
     return FileResponse(out_path, media_type=media_type, filename=os.path.basename(out_path))
 
 
+@app.patch("/features/{feature_id}")
+def update_feature_classification(feature_id: str, payload: dict, db: Session = Depends(get_db)):
+    new_class = payload.get("feature_type") or payload.get("classification")
+    if not new_class:
+        raise HTTPException(400, "Missing feature_type in request payload")
+
+    # 1. Update database record if present
+    feat_db = db.query(Feature).filter(Feature.id == feature_id).first()
+    if feat_db:
+        feat_db.feature_type = new_class
+        if feat_db.properties:
+            props = dict(feat_db.properties)
+            props["classification"] = new_class
+            props["feature_type"] = new_class
+            feat_db.properties = props
+        db.commit()
+
+    # 2. Update in-memory cache and GeoJSON output file
+    updated = False
+    for job_id, res in list(_LAST_RESULT.items()):
+        for feat in res.get("features", []):
+            f_props = feat.get("properties", {})
+            if f_props.get("id") == feature_id or feat.get("id") == feature_id:
+                f_props["classification"] = new_class
+                f_props["feature_type"] = new_class
+                updated = True
+
+                geo_path = os.path.join(OUTPUT_DIR, f"{job_id}.geojson")
+                if os.path.exists(geo_path):
+                    import json
+                    with open(geo_path, "w") as gf:
+                        json.dump(res, gf)
+                break
+
+    return {
+        "status": "success",
+        "feature_id": feature_id,
+        "new_classification": new_class,
+        "updated": updated or (feat_db is not None),
+    }
+
+
+
 
 def _background_extraction_worker(job_id: str, filepath: str, bounds: list[float]):
     """Background worker function executing MobileSAM extraction and updating progress state."""
@@ -352,14 +433,45 @@ def _background_extraction_worker(job_id: str, filepath: str, bounds: list[float
 
         for f in features:
             props = f.get("properties", {})
+            feat_id = props.get("id") or str(uuid.uuid4())
+            props["id"] = feat_id
             ftype = props.get("classification", props.get("feature_type", "unclassified"))
             breakdown[ftype] = breakdown.get(ftype, 0) + 1
             conf_sum += props.get("confidence", 0.85)
+
+        # Step 1.3: Bulk save features to database with geometry
+        from shapely.geometry import shape
+        feature_objs = []
+        for f in features:
+            props = f.get("properties", {})
+            feat_id = props.get("id")
+            try:
+                poly_shape = shape(f["geometry"])
+                wkt_geom = f"SRID=4326;{poly_shape.wkt}"
+                feature_objs.append(Feature(
+                    id=feat_id,
+                    job_id=job_id,
+                    feature_type=props.get("classification", props.get("feature_type", "unclassified")),
+                    confidence=float(props.get("confidence", 0.85)),
+                    geom=wkt_geom,
+                    properties=props
+                ))
+            except Exception:
+                pass
+
+        if feature_objs:
+            try:
+                db.bulk_save_objects(feature_objs)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                print(f"Bulk feature save fallback: {e}")
 
         avg_conf = round(conf_sum / max(len(features), 1), 2)
         meta = result.get("metadata", {})
         total_tiles = meta.get("total_tiles", _JOB_STATUS.get(job_id, {}).get("total_tiles", 121))
         raster_dims = f"{meta.get('width', 9095)} × {meta.get('height', 9636)} px"
+
 
         with _STATUS_LOCK:
             _JOB_STATUS[job_id] = {

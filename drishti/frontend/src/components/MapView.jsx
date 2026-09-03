@@ -19,7 +19,7 @@ function confidenceOpacity(conf) {
 
 function styleFeature(feature) {
   const conf = feature.properties?.confidence ?? 0.5;
-  const ftype = feature.properties?.feature_type ?? "unclassified";
+  const ftype = feature.properties?.classification || feature.properties?.feature_type || "unclassified";
   const palette = FEATURE_TYPE_COLOR[ftype] ?? FEATURE_TYPE_COLOR.unclassified;
   return {
     color: palette.stroke,
@@ -30,52 +30,78 @@ function styleFeature(feature) {
   };
 }
 
-function onEachFeature(feature, layer) {
-  const { feature_type, classification, confidence, classification_method, area_m2 } = feature.properties || {};
-  const label = classification || feature_type || "unclassified";
-  const palette = FEATURE_TYPE_COLOR[label] ?? FEATURE_TYPE_COLOR.unclassified;
-  const confPct = confidence != null ? Math.round(confidence * 100) : null;
+const CATEGORIES = ["farm", "building", "water", "tree", "road", "unclassified"];
 
-  let areaStr = "N/A";
-  if (area_m2 != null && area_m2 > 0) {
-    areaStr = area_m2 >= 10000 ? `${(area_m2 / 10000).toFixed(2)} ha` : `${Math.round(area_m2).toLocaleString()} m²`;
-  }
+function makeOnEachFeature(onReassignClass) {
+  return function onEachFeature(feature, layer) {
+    const props = feature.properties || {};
+    const { confidence, classification_method, area_m2 } = props;
+    const featId = props.id || feature.id || "";
+    const label = props.classification || props.feature_type || "unclassified";
+    const palette = FEATURE_TYPE_COLOR[label] ?? FEATURE_TYPE_COLOR.unclassified;
+    const confPct = confidence != null ? Math.round(confidence * 100) : null;
 
-  layer.bindPopup(
-    `<div style="font-family: 'Inter', system-ui, sans-serif; font-size: 12px; min-width: 170px;">
-      <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px;">
-        <span style="
-          width:10px; height:10px; border-radius:50%;
-          background:${palette.fill}; display:inline-block; flex-shrink:0;
-        "></span>
-        <strong style="text-transform:capitalize; font-size:13px; color:#f1f5f9;">
-          ${label}
-        </strong>
-      </div>
-      <div style="display:grid; grid-template-columns: auto 1fr; gap:4px 12px; color:#94a3b8;">
-        <span>Classification</span>
-        <span style="color:#f1f5f9; font-weight:500; text-transform:capitalize;">${label}</span>
-        <span>Confidence</span>
-        <span style="color:${confPct >= 80 ? '#4ade80' : confPct >= 50 ? '#facc15' : '#f87171'}; font-weight:600;">
-          ${confPct != null ? confPct + "%" : "n/a"}
-        </span>
-        <span>Method</span>
-        <span style="color:#cbd5e1;">${classification_method ?? "heuristic"}</span>
-        <span>Area</span>
-        <span style="color:#cbd5e1; font-weight:500;">${areaStr}</span>
-      </div>
-    </div>`,
-    { className: "drishti-popup" }
-  );
+    let areaStr = "N/A";
+    if (area_m2 != null && area_m2 > 0) {
+      areaStr = area_m2 >= 10000 ? `${(area_m2 / 10000).toFixed(2)} ha` : `${Math.round(area_m2).toLocaleString()} m²`;
+    }
 
+    // Build reassign options html
+    const optionsHtml = CATEGORIES.map(
+      (c) => `<option value="${c}"${c === label ? " selected" : ""}>${c}</option>`
+    ).join("");
 
-  layer.on("mouseover", function () {
-    layer.setStyle({ weight: 3, fillOpacity: Math.min(confidenceOpacity(confidence) + 0.2, 0.9) });
-  });
-  layer.on("mouseout", function () {
-    layer.setStyle(styleFeature(feature));
-  });
+    layer.bindPopup(
+      `<div style="font-family:'Inter',system-ui,sans-serif;font-size:12px;min-width:190px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:6px;">
+          <span style="width:10px;height:10px;border-radius:50%;background:${palette.fill};display:inline-block;flex-shrink:0;"></span>
+          <strong style="text-transform:capitalize;font-size:13px;color:#f1f5f9;">${label}</strong>
+        </div>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;color:#94a3b8;">
+          <span>Confidence</span>
+          <span style="color:${confPct >= 80 ? '#4ade80' : confPct >= 50 ? '#facc15' : '#f87171'};font-weight:600;">
+            ${confPct != null ? confPct + "%" : "n/a"}
+          </span>
+          <span>Method</span>
+          <span style="color:#cbd5e1;">${classification_method ?? "heuristic"}</span>
+          <span>Area</span>
+          <span style="color:#cbd5e1;font-weight:500;">${areaStr}</span>
+        </div>
+        <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
+          <label style="color:#94a3b8;font-size:11px;display:block;margin-bottom:4px;">Reassign Class</label>
+          <select id="reassign-${featId}" style="width:100%;background:#1e293b;border:1px solid rgba(255,255,255,0.15);border-radius:4px;color:#f1f5f9;padding:4px 6px;font-size:12px;cursor:pointer;">
+            ${optionsHtml}
+          </select>
+        </div>
+      </div>`,
+      { className: "drishti-popup" }
+    );
+
+    // Wire the select dropdown after popup opens
+    layer.on("popupopen", function () {
+      const el = document.getElementById(`reassign-${featId}`);
+      if (el) {
+        el.onchange = function () {
+          if (onReassignClass) onReassignClass(featId, el.value);
+          fetch(`${API_URL}/features/${featId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ feature_type: el.value }),
+          }).catch(console.error);
+        };
+      }
+    });
+
+    layer.on("mouseover", function () {
+      layer.setStyle({ weight: 3, fillOpacity: Math.min(confidenceOpacity(confidence) + 0.2, 0.9) });
+    });
+    layer.on("mouseout", function () {
+      layer.setStyle(styleFeature(feature));
+    });
+  };
 }
+
+
 
 // Auto-fit map to bounds when they change
 function BoundsFitter({ bounds }) {
@@ -93,11 +119,12 @@ function BoundsFitter({ bounds }) {
   return null;
 }
 
-export default function MapView({ bounds, geojson, activeLayers, jobId }) {
+export default function MapView({ bounds, geojson, activeLayers, jobId, onReassignClass }) {
   const center = bounds
     ? [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]
     : DEFAULT_CENTER;
 
+  const onEachFeature = makeOnEachFeature(onReassignClass);
 
   const pointFeatures = (geojson?.features || []).filter((f) => {
     if (f.geometry.type !== "Point") return false;
@@ -174,6 +201,7 @@ export default function MapView({ bounds, geojson, activeLayers, jobId }) {
             onEachFeature={onEachFeature}
           />
         )}
+
 
         {pointFeatures.map((f, i) => {
           const [lng, lat] = f.geometry.coordinates;
